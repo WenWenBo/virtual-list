@@ -156,6 +156,8 @@ export default class VirtuList extends PureComponent<Props, State> {
       }
     }
 
+    const estimatedTotalSize = this.getEstimatedTotalSize();
+
     return createElement('div', {
         className,
         onScroll,
@@ -174,12 +176,32 @@ export default class VirtuList extends PureComponent<Props, State> {
         children: items,
         ref: innerRef,
         style: {
-          height: 2000,
+          height: estimatedTotalSize,
           pointerEvents: isScrolling ? 'none' : undefined,
           width: '100%',
         }
       })
     );
+  }
+
+  getEstimatedTotalSize(): number {
+    const { itemCount } = this.props;
+    let { itemMetadataMap, estimatedItemSize, lastMeasuredIndex } = this._instanceProps;
+    let totalSizeOfMeasuredItems = 0;
+
+    if (lastMeasuredIndex >= itemCount) {
+      lastMeasuredIndex = itemCount - 1;
+    }
+
+    if (lastMeasuredIndex >= 0) {
+      const itemMetadata = itemMetadataMap[lastMeasuredIndex];
+      totalSizeOfMeasuredItems = itemMetadata.offset + itemMetadata.size;
+    }
+
+    const numUnmeasuredItems = itemCount - lastMeasuredIndex - 1;
+    const totalSizeOfUnmeasuredItems = numUnmeasuredItems * estimatedItemSize;
+
+    return totalSizeOfMeasuredItems + totalSizeOfUnmeasuredItems;
   }
 
   _getRangeToRender(): [number, number, number, number] {
