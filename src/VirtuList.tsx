@@ -6,7 +6,7 @@ const DEFAULT_ESTIMATED_ITEM_SIZE = 50;
 
 type ScrollDirection = "forward" | "backward";
 
-// type itemSize = number | ((index: number) => number);
+type itemSizeGetter = (index: number) => number;
 
 interface ItemMetadata {
   offset: number;
@@ -23,8 +23,10 @@ interface Props {
   children: any;
   itemData: any;
   itemCount: number;
-  height: number | string;
-  width: number | string;
+  height: number;
+  width: number;
+  overscanCount: number;
+  itemSize: itemSizeGetter;
   className?: string;
   style?: Object;
   outerRef?: any;
@@ -42,9 +44,11 @@ interface State {
 
 export default class VirtuList extends PureComponent<Props, State> {
   initInstanceProps(instance: any): InstanceProps {
-    const { props: { estimatedItemSize = DEFAULT_ESTIMATED_ITEM_SIZE } = {} } =
-      instance;
-    console.log({ estimatedItemSize });
+    const {
+      props: {
+        estimatedItemSize = DEFAULT_ESTIMATED_ITEM_SIZE
+      } = {}
+    } = instance;
     const instanceProps = {
       itemMetadataMap: {},
       estimatedItemSize: estimatedItemSize,
@@ -69,6 +73,12 @@ export default class VirtuList extends PureComponent<Props, State> {
   _instanceProps = this.initInstanceProps(this);
   _outerRef?: HTMLDivElement;
   _resetIsScrollingTimeoutId: TimeoutID | null = null;
+
+  // default props
+  static defaultProps = {
+    itemData: undefined,
+    overscanCount: 2,
+  }
 
   state: State = {
     instance: this,
@@ -128,7 +138,7 @@ export default class VirtuList extends PureComponent<Props, State> {
       style,
     } = this.props;
     const { isScrolling } = this.state;
-    const [startIndex, stopIndex] = [0, 30];
+    const [startIndex, stopIndex] = this._getRangeToRender();
 
     const onScroll = this.onScroll;
 
@@ -172,6 +182,150 @@ export default class VirtuList extends PureComponent<Props, State> {
     );
   }
 
+  _getRangeToRender(): [number, number, number, number] {
+    const { itemCount, overscanCount } = this.props;
+    const { isScrolling, scrollDirection, scrollOffset } = this.state;
+
+    if (itemCount === 0) {
+      return [0, 0, 0, 0];
+    }
+
+    const startIndex = this.getStartIndexForOffset(scrollOffset);
+    const stopIndex = this.getStopIndexForStartIndex(startIndex, scrollOffset);
+
+    const overscanBackward =
+        !isScrolling || scrollDirection === 'backward'
+          ? Math.max(1, overscanCount)
+          : 1;
+      const overscanForward =
+        !isScrolling || scrollDirection === 'forward'
+          ? Math.max(1, overscanCount)
+          : 1;
+
+    return [
+      Math.max(0, startIndex - overscanBackward),
+      Math.max(0, Math.min(itemCount - 1, stopIndex + overscanForward)),
+      startIndex,
+      stopIndex,
+    ];
+  }
+
+  getStartIndexForOffset(
+    scrollOffset: number,
+  ): number {
+    const { itemMetadataMap, lastMeasuredIndex } = this._instanceProps;
+
+    const lastMeasuredItemOffset =
+      lastMeasuredIndex > 0 ? itemMetadataMap[lastMeasuredIndex].offset : 0;
+    
+      if (lastMeasuredItemOffset >= scrollOffset) {
+        return this.findNearestItemBinarySearch(
+          lastMeasuredIndex,
+          0,
+          scrollOffset,
+        );
+      } else {
+        return this.findNearestItemExponentialSearch(
+          Math.max(0, lastMeasuredIndex),
+          scrollOffset,
+        )
+      }
+  }
+
+  getStopIndexForStartIndex(
+    startIndex: number,
+    scrollOffset: number,
+  ): number {
+    const { height, itemCount } = this.props;
+
+    const itemMetadata = this.getItemMetadata(startIndex);
+    const maxOffset = scrollOffset + height;
+
+    let offset = itemMetadata.offset + itemMetadata.size;
+    let stopIndex = startIndex;
+
+    while (stopIndex < itemCount - 1 && offset < maxOffset) {
+      stopIndex++;
+      offset += this.getItemMetadata(stopIndex).size;
+    }
+
+    return stopIndex;
+  }
+
+  getItemMetadata(
+    index: number,
+  ): ItemMetadata {
+    const { itemSize } = this.props;
+    const { itemMetadataMap, lastMeasuredIndex } = this._instanceProps;
+
+    if (index > lastMeasuredIndex) {
+      let offset = 0;
+      if (lastMeasuredIndex >= 0) {
+        const itemMetadata = itemMetadataMap[lastMeasuredIndex];
+        offset = itemMetadata.offset + itemMetadata.size;
+      }
+
+      for (let i = lastMeasuredIndex + 1; i <= index; i++) {
+        let size = itemSize(i);
+
+        itemMetadataMap[i] = {
+          offset,
+          size,
+        }
+        
+        offset += size;
+      }
+
+      this._instanceProps.lastMeasuredIndex = index;
+    }
+
+    return itemMetadataMap[index];
+  }
+
+  // 二分法查找
+  findNearestItemBinarySearch(
+    high: number,
+    low: number,
+    offset: number,
+  ): number {
+    while (low <= high) {
+      const middle = low + Math.floor((high / low) / 2);
+      const currentOffset = this.getItemMetadata(middle).offset;
+
+      if (currentOffset === offset) {
+        return middle;
+      } else if (currentOffset < offset) {
+        low = middle + 1;
+      } else if (currentOffset > offset) {
+        high = middle - 1;
+      }
+    }
+
+    return low > 0 ? low - 1 : 0;
+  }
+
+  // 指数查找
+  findNearestItemExponentialSearch(
+    index: number,
+    offset: number,
+  ): number {
+    const { itemCount } = this.props;
+    let interval = 1;
+
+    while(
+      index < itemCount &&
+      this.getItemMetadata(index).offset < offset
+    ) {
+      index += interval;
+      interval *= 2;
+    }
+
+    return this.findNearestItemBinarySearch(
+      Math.min(index, itemCount - 1),
+      Math.floor(index / 2),
+      offset,
+    )
+  }
 
   _callPropsCallbacks() {
     
