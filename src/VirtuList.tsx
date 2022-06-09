@@ -1,12 +1,28 @@
 import { createElement, PureComponent } from "react";
 
-import { cancelTimeout, TimeoutID } from "./util/timer";
+import { cancelTimeout, TimeoutID, requestTimeout } from "./util/timer";
 
 const DEFAULT_ESTIMATED_ITEM_SIZE = 50;
+const IS_SCROLLING_DEBOUNCE_INTERVAL = 150;
 
 type ScrollDirection = "forward" | "backward";
 
 type itemSizeGetter = (index: number) => number;
+
+type HTMLElementEvent<T extends HTMLElement> = Event & {
+  target: T
+  currentTarget: T
+}
+
+type AnchorItem = {
+  index: number,
+  offset: number,
+}
+
+type Range = {
+  startIndex: number,
+  stopIndex: number,
+}
 
 interface ItemMetadata {
   offset: number;
@@ -27,6 +43,7 @@ interface Props {
   width: number;
   overscanCount: number;
   itemSize: itemSizeGetter;
+  initialIndex: number;
   className?: string;
   style?: Object;
   outerRef?: any;
@@ -56,11 +73,12 @@ export default class VirtuList extends PureComponent<Props, State> {
     };
 
     instance.resetAfterIndex = (index: number, shouldForceUpdate = true) => {
-      console.log({ index, shouldForceUpdate });
       instanceProps.lastMeasuredIndex = Math.min(
         instanceProps.lastMeasuredIndex,
         index - 1
       );
+
+      instance._styleCacheMap.clear();
 
       if (shouldForceUpdate) {
         instance.forceUpdate();
@@ -70,14 +88,28 @@ export default class VirtuList extends PureComponent<Props, State> {
     return instanceProps;
   }
 
+  _styleCacheMap: Map<number, Object> = new Map();
   _instanceProps = this.initInstanceProps(this);
   _outerRef?: HTMLDivElement;
   _resetIsScrollingTimeoutId: TimeoutID | null = null;
+  _range: Range = {
+    startIndex: 0,
+    stopIndex: 0,
+  };
+  // anchor item
+  _anchorItem: AnchorItem = {
+    index: 0,
+    offset: 0,
+  };
+  // is initial
+  _isInit: Boolean = false;
+  _isAdjustScroll: Boolean = false;
 
   // default props
   static defaultProps = {
     itemData: undefined,
     overscanCount: 2,
+    initialIndex: 0,
   }
 
   state: State = {
@@ -96,27 +128,71 @@ export default class VirtuList extends PureComponent<Props, State> {
   // eslint-disable-next-line no-useless-constructor
   constructor(props: Props) {
     super(props);
+    this._range = this.getInitialRange();
+  }
+
+  getInitialRange(): Range {
+    const { height, initialIndex, itemCount, overscanCount } = this.props;
+    const { estimatedItemSize } = this._instanceProps;
+    const minNum: number = Math.ceil(height / estimatedItemSize);
+
+    let startIndex = initialIndex;
+    let stopIndex = initialIndex + minNum - 1;
+    // initialIndex 后面的内容不够撑起一屏
+    if (stopIndex >= itemCount) {
+      startIndex -= stopIndex - (itemCount - 1);
+      stopIndex = itemCount - 1;
+    }
+
+    const overscan = Math.max(1, overscanCount);
+
+    return {
+      startIndex: Math.max(0, startIndex - overscan),
+      stopIndex: Math.max(0, Math.min(itemCount - 1, stopIndex + overscan)),
+    }
   }
 
   componentDidMount() {
-    const { initialScrollOffset } = this.props;
+    const { initialScrollOffset, initialIndex } = this.props;
+    const { itemMetadataMap } = this._instanceProps;
 
     if (typeof initialScrollOffset === 'number' && this._outerRef != null) {
       const outRef = this._outerRef as HTMLElement;
       outRef.scrollTop = initialScrollOffset;
+      console.log(this._outerRef.scrollTop)
     }
 
+    if (typeof initialIndex === 'number' && this._outerRef != null) {
+      this.adjustScroll(itemMetadataMap[initialIndex].offset)
+      // init anchor
+      this._anchorItem = {
+        index: initialIndex,
+        offset: 0,
+      }
+    }
+
+    this._isInit = true;
     this._callPropsCallbacks();
   }
 
   componentDidUpdate() {
     const { scrollOffset, scrollUpdateWasRequested } = this.state;
+    const { itemMetadataMap } = this._instanceProps;
 
     if (scrollUpdateWasRequested && this._outerRef != undefined) {
       const outRef = this._outerRef as HTMLElement;
       outRef.scrollTop = scrollOffset;
     }
 
+    // update scrollTop to anchorItem
+    if (this._outerRef != null) {
+      const outRef = this._outerRef as HTMLElement;
+      const newScrollOffset = itemMetadataMap[this._anchorItem.index].offset
+          + this._anchorItem.offset;
+      if (outRef.scrollTop !== newScrollOffset) {
+        this.adjustScroll(newScrollOffset);
+      }
+    }
     this._callPropsCallbacks();
   }
 
@@ -138,9 +214,9 @@ export default class VirtuList extends PureComponent<Props, State> {
       style,
     } = this.props;
     const { isScrolling } = this.state;
-    const [startIndex, stopIndex] = this._getRangeToRender();
+    const { startIndex, stopIndex } = this._range;
 
-    const onScroll = this.onScroll;
+    const onScroll = this._onScroll;
 
     const items = [];
     if (itemCount > 0) {
@@ -151,6 +227,7 @@ export default class VirtuList extends PureComponent<Props, State> {
             key: index,
             isScrolling,
             index, 
+            style: this._getItemStyle(index),
           })
         )
       }
@@ -184,6 +261,29 @@ export default class VirtuList extends PureComponent<Props, State> {
     );
   }
 
+  _getItemStyle = (index: number): Object => {
+    let style;
+    if (this._styleCacheMap.has(index)) {
+      style = this._styleCacheMap.get(index);
+    } else {
+      const offset = this.getItemOffset(index);
+      // const size = this.getItemSize(index);
+
+      style = {
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        transform: `translate(0px, ${offset}px)`,
+        // height: size,
+        boxSizing: 'border-box',
+      };
+
+      this._styleCacheMap.set(index, style);
+    }
+
+    return style || {};
+  }
+
   getEstimatedTotalSize(): number {
     const { itemCount } = this.props;
     let { itemMetadataMap, estimatedItemSize, lastMeasuredIndex } = this._instanceProps;
@@ -204,32 +304,31 @@ export default class VirtuList extends PureComponent<Props, State> {
     return totalSizeOfMeasuredItems + totalSizeOfUnmeasuredItems;
   }
 
-  _getRangeToRender(): [number, number, number, number] {
+  _getRangeToRender(
+    scrollOffset: number,
+  ): Range {
     const { itemCount, overscanCount } = this.props;
-    const { isScrolling, scrollDirection, scrollOffset } = this.state;
+    const { itemMetadataMap } = this._instanceProps;
 
     if (itemCount === 0) {
-      return [0, 0, 0, 0];
+      return { startIndex: 0, stopIndex: 0 };
     }
 
     const startIndex = this.getStartIndexForOffset(scrollOffset);
     const stopIndex = this.getStopIndexForStartIndex(startIndex, scrollOffset);
 
-    const overscanBackward =
-        !isScrolling || scrollDirection === 'backward'
-          ? Math.max(1, overscanCount)
-          : 1;
-      const overscanForward =
-        !isScrolling || scrollDirection === 'forward'
-          ? Math.max(1, overscanCount)
-          : 1;
+    // update anchor item
+    this._anchorItem = {
+      index: startIndex,
+      offset: scrollOffset - itemMetadataMap[startIndex].offset
+    };
 
-    return [
-      Math.max(0, startIndex - overscanBackward),
-      Math.max(0, Math.min(itemCount - 1, stopIndex + overscanForward)),
-      startIndex,
-      stopIndex,
-    ];
+    const overscan = Math.max(1, overscanCount);
+
+    return {
+      startIndex: Math.max(0, startIndex - overscan),
+      stopIndex: Math.max(0, Math.min(itemCount - 1, stopIndex + overscan)),
+    };
   }
 
   getStartIndexForOffset(
@@ -240,18 +339,18 @@ export default class VirtuList extends PureComponent<Props, State> {
     const lastMeasuredItemOffset =
       lastMeasuredIndex > 0 ? itemMetadataMap[lastMeasuredIndex].offset : 0;
     
-      if (lastMeasuredItemOffset >= scrollOffset) {
-        return this.findNearestItemBinarySearch(
-          lastMeasuredIndex,
-          0,
-          scrollOffset,
-        );
-      } else {
-        return this.findNearestItemExponentialSearch(
-          Math.max(0, lastMeasuredIndex),
-          scrollOffset,
-        )
-      }
+    if (lastMeasuredItemOffset >= scrollOffset) {
+      return this.findNearestItemBinarySearch(
+        lastMeasuredIndex,
+        0,
+        scrollOffset,
+      );
+    } else {
+      return this.findNearestItemExponentialSearch(
+        Math.max(0, lastMeasuredIndex),
+        scrollOffset,
+      )
+    }
   }
 
   getStopIndexForStartIndex(
@@ -274,6 +373,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     return stopIndex;
   }
 
+  // 在这里更新lastMeasuredIndex
   getItemMetadata(
     index: number,
   ): ItemMetadata {
@@ -304,6 +404,15 @@ export default class VirtuList extends PureComponent<Props, State> {
     return itemMetadataMap[index];
   }
 
+  getItemOffset(index: number): number {
+    return this.getItemMetadata(index).offset;
+  }
+
+  getItemSize(index: number): number {
+    const { itemMetadataMap } = this._instanceProps;
+    return itemMetadataMap[index].size;
+  }
+
   // 二分法查找
   findNearestItemBinarySearch(
     high: number,
@@ -311,7 +420,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     offset: number,
   ): number {
     while (low <= high) {
-      const middle = low + Math.floor((high / low) / 2);
+      const middle = low + Math.floor((high - low) / 2);
       const currentOffset = this.getItemMetadata(middle).offset;
 
       if (currentOffset === offset) {
@@ -349,13 +458,86 @@ export default class VirtuList extends PureComponent<Props, State> {
     )
   }
 
+  /**
+   * scroll for adjust, without trigger update
+   * @param index 
+   */
+  adjustScroll = (index: number): void => {
+    if (this._outerRef != null) {
+      const outRef = this._outerRef as HTMLElement;
+      if (outRef.scrollTop !== index) {
+        this._isAdjustScroll = true;
+        outRef.scrollTop = index;
+        this.setState({ scrollOffset: outRef.scrollTop });
+      }
+    }
+  }
+
   _callPropsCallbacks() {
-    
-  }
-
-  onScroll() {
 
   }
+
+  _onScroll = (event: HTMLElementEvent<HTMLDivElement>): void => {
+
+    // no trigger scroll
+    if (this._isAdjustScroll) {
+      this._isAdjustScroll = false;
+      return;
+    }
+    const { clientHeight, scrollHeight, scrollTop } = event.target
+    // console.log({ clientHeight, scrollHeight, scrollTop, state: this.state })
+
+    // if (this._isInit) {
+    //   this._isInit = false;
+    //   return;
+    // }
+
+    this.setState(prevState => {
+      if (prevState.scrollOffset === scrollTop) {
+        // Scroll position may have been updated by cDM/cDU,
+        // In which case we don't need to trigger another render,
+        // And we don't want to update state.isScrolling.
+        return null;
+      }
+
+      // Prevent Safari's elastic scrolling from causing visual shaking when scrolling past bounds.
+      const scrollOffset = Math.max(
+        0,
+        Math.min(scrollTop, scrollHeight - clientHeight)
+      );
+
+      this._range = this._getRangeToRender(scrollOffset);
+
+      return {
+        isScrolling: true,
+        scrollDirection:
+          prevState.scrollOffset < scrollOffset ? 'forward' : 'backward',
+        scrollOffset,
+        scrollUpdateWasRequested: false,
+      };
+    }, this._resetIsScrollingDebounced);
+  }
+
+  _resetIsScrollingDebounced = () => {
+    if (this._resetIsScrollingTimeoutId !== null) {
+      cancelTimeout(this._resetIsScrollingTimeoutId);
+    }
+
+    this._resetIsScrollingTimeoutId = requestTimeout(
+      this._resetIsScrolling,
+      IS_SCROLLING_DEBOUNCE_INTERVAL
+    );
+  };
+
+  _resetIsScrolling = () => {
+    this._resetIsScrollingTimeoutId = null;
+
+    this.setState({ isScrolling: false }, () => {
+      // Clear style cache after state update has been committed.
+      // This way we don't break pure sCU for items that don't use isScrolling param.
+      this._styleCacheMap.clear();
+    });
+  };
 
   _outerRefSetter = (ref: any): void => {
     const { outerRef } = this.props;
