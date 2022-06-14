@@ -37,6 +37,11 @@ type ResetReachCbOption = {
   end: Boolean,
 }
 
+type PrevState = {
+  originalIndex: number,
+  itemCount: number,
+}
+
 interface ItemMetadata {
   offset: number;
   size: number;
@@ -67,6 +72,8 @@ interface Props {
   initialScrollOffset?: number;
   startReached?: Function;
   endReached?: Function;
+  itemKey?: (index: number, data: any) => any,
+  onScroll?: Function,
 }
 
 interface State {
@@ -76,6 +83,8 @@ interface State {
   scrollOffset: number;
   scrollUpdateWasRequested: boolean;
 }
+
+const defaultItemKey = (index: number, data: any) => index;
 
 export default class VirtuList extends PureComponent<Props, State> {
 
@@ -87,7 +96,10 @@ export default class VirtuList extends PureComponent<Props, State> {
   };
   _outerRef?: HTMLDivElement;
   _resetIsScrollingTimeoutId: TimeoutID | null = null;
-  _prevOriginal: number = 0;
+  _prevState: PrevState = {
+    originalIndex: 0,
+    itemCount: 0,
+  }
   _range: Range = {
     startIndex: 0,
     stopIndex: 0,
@@ -136,17 +148,17 @@ export default class VirtuList extends PureComponent<Props, State> {
   }
 
   componentDidMount() {
-    const { initialScrollOffset, initialIndex } = this.props;
+    const { initialIndex } = this.props;
     const { itemMetadataMap } = this._metaData;
 
-    if (typeof initialScrollOffset === 'number' && this._outerRef != null) {
-      const outRef = this._outerRef as HTMLElement;
-      outRef.scrollTop = initialScrollOffset;
-      console.log(this._outerRef.scrollTop)
-    }
+    // if (typeof initialScrollOffset === 'number' && this._outerRef != null) {
+    //   const outRef = this._outerRef as HTMLElement;
+    //   outRef.scrollTop = initialScrollOffset;
+    //   console.log(this._outerRef.scrollTop)
+    // }
 
     if (typeof initialIndex === 'number' && this._outerRef != null) {
-      this.adjustScroll(itemMetadataMap[initialIndex].offset)
+      this._adjustScroll(itemMetadataMap[initialIndex].offset)
       // init anchor
       this._anchorItem = {
         index: initialIndex,
@@ -154,34 +166,19 @@ export default class VirtuList extends PureComponent<Props, State> {
       }
     }
 
-    this._flag.isInit = true;
-    this._callPropsCallbacks();
+    this._init();
   }
 
   componentDidUpdate() {
-    const { itemMetadataMap } = this._metaData;
-    const { originalIndex, itemCount } = this.props;
+    const { itemCount } = this.props;
 
-    if (this._flag.followOutput) {
-      this._flag.followOutput = false;
-      this._range = this.scrollToItem(itemCount - 1);
-    } else if (originalIndex > this._prevOriginal) {
-      // 原点变大了，说明头部增加了内容
-      this._rangeStep(originalIndex - this._prevOriginal);
-      this._prevOriginal = originalIndex;
+    if (itemCount !== this._prevState.itemCount) {
+      this._callLengthChangeCallbacks();
+      this._prevState.itemCount = itemCount;
     }
 
     // update scrollTop to anchorItem
-    if (this._outerRef != null) {
-      const outRef = this._outerRef as HTMLElement;
-      const { index, offset } = this._anchorItem;
-      const newScrollOffset = itemMetadataMap[index].offset
-          + offset;
-      if (outRef.scrollTop !== newScrollOffset) {
-        this.adjustScroll(newScrollOffset);
-      }
-    }
-    this._callPropsCallbacks();
+    this._scrollToAnchorItem();
   }
 
   componentWillUnmount() {
@@ -197,9 +194,8 @@ export default class VirtuList extends PureComponent<Props, State> {
       className,
       itemData,
       innerRef,
-      height,
-      width,
       style,
+      itemKey = defaultItemKey,
     } = this.props;
     const { isScrolling } = this.state;
     const { startIndex, stopIndex } = this._range;
@@ -212,7 +208,7 @@ export default class VirtuList extends PureComponent<Props, State> {
         items.push(
           createElement(children, {
             data: itemData,
-            key: index,
+            key: itemKey(index, itemData),
             isScrolling,
             index, 
             style: this._getItemStyle(index),
@@ -229,9 +225,9 @@ export default class VirtuList extends PureComponent<Props, State> {
         ref: this._outerRefSetter,
         style: {
           position: 'relative',
-          height,
-          width,
-          overflow: 'auto',
+          height: '100%',
+          width: '100%',
+          overflow: 'hidden overlay',
           WebkitOverflowScrolling: 'touch',
           willChange: 'transform',
           ...style,
@@ -359,7 +355,16 @@ export default class VirtuList extends PureComponent<Props, State> {
     }
   }
 
-  scrollToItem(index: number): Range {
+  // 定位到底部
+  scrollToBottom(): void {
+    const { itemCount } = this.props;
+    this.locateToItem(itemCount - 1);
+
+    // update scrollTop to anchorItem
+    this._scrollToAnchorItem();
+  }
+
+  locateToItem(index: number): void {
     const { height, itemCount } = this.props;
     let startIndex = index;
     let stopIndex = index;
@@ -379,11 +384,13 @@ export default class VirtuList extends PureComponent<Props, State> {
         startIndex--;
       }
     }
+
     this._anchorItem = {
       index: index,
-      offset: 0,
+      offset: index === itemCount - 1
+        ? this.getItemMetadata(index).size : 0,
     };
-    return {
+    this._range = {
       startIndex: this._safeStartIndex(startIndex),
       stopIndex: this._safeStopIndex(stopIndex),
     };
@@ -494,11 +501,25 @@ export default class VirtuList extends PureComponent<Props, State> {
     )
   }
 
+  _scrollToAnchorItem(): void {
+    const { itemMetadataMap } = this._metaData;
+    // update scrollTop to anchorItem
+    if (this._outerRef != null) {
+      const outRef = this._outerRef as HTMLElement;
+      const { index, offset } = this._anchorItem;
+      const newScrollOffset = itemMetadataMap[index].offset
+          + offset;
+      if (outRef.scrollTop !== newScrollOffset) {
+        this._adjustScroll(newScrollOffset);
+      }
+    }
+  }
+
   /**
    * scroll for adjust, without trigger update
    * @param index 
    */
-  adjustScroll = (index: number): void => {
+  _adjustScroll = (index: number): void => {
     if (this._outerRef != null) {
       const outRef = this._outerRef as HTMLElement;
       if (outRef.scrollTop !== index) {
@@ -540,6 +561,14 @@ export default class VirtuList extends PureComponent<Props, State> {
     this._flag.followOutput = true;
   }
 
+  _init(): void {
+    const { originalIndex, itemCount } = this.props;
+    this._flag.isInit = true;
+
+    this._prevState.itemCount = itemCount;
+    this._prevState.originalIndex = originalIndex;
+  }
+
   /**
    * 展示区域整体移动多少项，默认向下移动，如果向上则num为负的
    * @param num 移动项的数量
@@ -556,8 +585,72 @@ export default class VirtuList extends PureComponent<Props, State> {
     this.resetAfterIndex(0);
   }
 
-  _callPropsCallbacks() {
+  _fillRange(): void {
+    const { itemCount, height } = this.props;
+    const { startIndex, stopIndex } = this._range;
 
+    if (startIndex === 0 && stopIndex === itemCount - 1) {
+      return;
+    }
+
+    let sumHeight = 0;
+    for (let i = startIndex; i < stopIndex; i++) {
+      sumHeight += this.getItemMetadata(i).size;
+    }
+
+    if (sumHeight < height) {
+      let startIdx = startIndex - 1;
+      let stopIdx = stopIndex + 1;
+      
+      // 向后补齐
+      while (stopIdx < itemCount && sumHeight < height) {
+        sumHeight += this.getItemMetadata(stopIdx).size;
+        stopIdx++;
+      }
+
+      // 向前补齐
+      if (sumHeight < height) {
+        while (startIdx >= 0 && sumHeight < height) {
+          sumHeight += this.getItemMetadata(startIdx).size;
+          startIdx--;
+        }
+      }
+
+      this._range = {
+        startIndex: this._safeStartIndex(startIdx),
+        stopIndex: this._safeStopIndex(stopIdx),
+      };
+    }
+
+  }
+
+  /**
+   * 数组长度发生变化
+   */
+  _callLengthChangeCallbacks(): void {
+    const { originalIndex, itemCount } = this.props;
+    if (this._flag.followOutput) {
+      /**
+       * 定位到底部
+       * 容易出现问题，单独拿出来，与其他操作区分
+       */
+      this._flag.followOutput = false;
+      this.locateToItem(itemCount - 1);
+    } else {
+      if (originalIndex > this._prevState.originalIndex) {
+        // 原点变大了，说明头部增加了内容
+        this._rangeStep(originalIndex - this._prevState.originalIndex);
+        this._prevState.originalIndex = originalIndex;
+  
+        this._flag.disableStartReachCallback = false;
+      } else {
+        // 否则说明是在尾部增加了内容
+        this._flag.disableEndReachCallback = false;
+      }
+
+      // range不够一屏的时候补齐range
+      this._fillRange();
+    }
   }
 
   _onScroll = (event: HTMLElementEvent<HTMLDivElement>): void => {
@@ -567,8 +660,10 @@ export default class VirtuList extends PureComponent<Props, State> {
       this._flag.isAdjustScroll = false;
       return;
     }
-    const { startReached, endReached, reachThreshold } = this.props;
+    const { startReached, endReached, reachThreshold, onScroll } = this.props;
     const { clientHeight, scrollHeight, scrollTop } = event.target
+
+    onScroll && onScroll(event);
 
     this.setState(prevState => {
       if (prevState.scrollOffset === scrollTop) {
