@@ -14,7 +14,7 @@ type HTMLElementEvent<T extends HTMLElement> = Event & {
   currentTarget: T
 }
 
-type AnchorItem = {
+type PositionItem = {
   index: number,
   offset: number,
 }
@@ -105,7 +105,12 @@ export default class VirtuList extends PureComponent<Props, State> {
     stopIndex: 0,
   };
   // anchor item
-  _anchorItem: AnchorItem = {
+  _anchorItem: PositionItem = {
+    index: 0,
+    offset: 0,
+  };
+  // 需要定位到的项
+  _targetItem: PositionItem = {
     index: 0,
     offset: 0,
   };
@@ -160,7 +165,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     if (typeof initialIndex === 'number' && this._outerRef != null) {
       this._adjustScroll(itemMetadataMap[initialIndex].offset)
       // init anchor
-      this._anchorItem = {
+      this._targetItem = {
         index: initialIndex,
         offset: 0,
       }
@@ -173,12 +178,14 @@ export default class VirtuList extends PureComponent<Props, State> {
     const { itemCount } = this.props;
 
     if (itemCount !== this._prevState.itemCount) {
+      // 高度发生变化更新要定位到的点为锚点
+      this._targetItem = { ...this._anchorItem };
       this._callLengthChangeCallbacks();
       this._prevState.itemCount = itemCount;
     }
 
     // update scrollTop to anchorItem
-    this._scrollToAnchorItem();
+    this._scrollToTargetItem();
   }
 
   componentWillUnmount() {
@@ -201,6 +208,8 @@ export default class VirtuList extends PureComponent<Props, State> {
     const { startIndex, stopIndex } = this._range;
 
     const onScroll = this._onScroll;
+
+    this._anchorItem = this._getAnchorItem();
 
     const items = [];
     if (itemCount > 0) {
@@ -303,7 +312,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     const stopIndex = this.getStopIndexForStartIndex(startIndex, scrollOffset);
 
     // update anchor item
-    this._anchorItem = {
+    this._targetItem = {
       index: startIndex,
       offset: scrollOffset - itemMetadataMap[startIndex].offset
     };
@@ -361,7 +370,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     this.locateToItem(itemCount - 1);
 
     // update scrollTop to anchorItem
-    this._scrollToAnchorItem();
+    this._scrollToTargetItem();
   }
 
   locateToItem(index: number): void {
@@ -385,7 +394,7 @@ export default class VirtuList extends PureComponent<Props, State> {
       }
     }
 
-    this._anchorItem = {
+    this._targetItem = {
       index: index,
       offset: index === itemCount - 1
         ? this.getItemMetadata(index).size : 0,
@@ -501,12 +510,12 @@ export default class VirtuList extends PureComponent<Props, State> {
     )
   }
 
-  _scrollToAnchorItem(): void {
+  _scrollToTargetItem(): void {
     const { itemMetadataMap } = this._metaData;
     // update scrollTop to anchorItem
     if (this._outerRef != null) {
       const outRef = this._outerRef as HTMLElement;
-      const { index, offset } = this._anchorItem;
+      const { index, offset } = this._targetItem;
       const newScrollOffset = itemMetadataMap[index].offset
           + offset;
       if (outRef.scrollTop !== newScrollOffset) {
@@ -561,6 +570,19 @@ export default class VirtuList extends PureComponent<Props, State> {
     this._flag.followOutput = true;
   }
 
+  _getAnchorItem(): PositionItem {
+    const { scrollOffset } = this.state;
+    const { itemMetadataMap } = this._metaData;
+    if (scrollOffset <= 0) {
+      return { index: 0, offset: 0 };
+    }
+    const index = this.getStartIndexForOffset(scrollOffset);
+    return {
+      index,
+      offset: scrollOffset - itemMetadataMap[index].offset,
+    }
+  }
+
   _init(): void {
     const { originalIndex, itemCount } = this.props;
     this._flag.isInit = true;
@@ -577,7 +599,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     if (num === 0) {
       return;
     }
-    this._anchorItem.index = this._anchorItem.index + num;
+    this._targetItem.index = this._targetItem.index + num;
     this._range = {
       startIndex: this._range.startIndex + num,
       stopIndex: this._range.stopIndex + num,
@@ -588,7 +610,7 @@ export default class VirtuList extends PureComponent<Props, State> {
   _fillRange(): void {
     const { itemCount, height } = this.props;
     const { startIndex, stopIndex } = this._range;
-
+    
     if (startIndex === 0 && stopIndex === itemCount - 1) {
       return;
     }
