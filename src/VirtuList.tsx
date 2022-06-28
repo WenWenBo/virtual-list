@@ -4,6 +4,7 @@ import { cancelTimeout, TimeoutID, requestTimeout } from "./util/timer";
 
 const DEFAULT_ESTIMATED_ITEM_SIZE = 50;
 const IS_SCROLLING_DEBOUNCE_INTERVAL = 150;
+const VIRTUAL_ORIGINAL_INDEX = 10 ** 7; // virtual original index for originalIndex
 
 type ScrollDirection = "forward" | "backward";
 
@@ -30,6 +31,12 @@ type Flag = {
   disableStartReachCallback: Boolean,
   disableEndReachCallback: Boolean,
   followOutput: Boolean,
+}
+
+type VirtualIndex = {
+  initialIndex: number, // 虚拟的初始下标
+  minIndex: number, // 虚拟的最小项下标
+  maxIndex: number, // 虚拟的最大项下标
 }
 
 type ResetReachCbOption = {
@@ -122,6 +129,11 @@ export default class VirtuList extends PureComponent<Props, State> {
     disableEndReachCallback: false,
     followOutput: false,
   };
+  _virtualIndex: VirtualIndex = {
+    initialIndex: VIRTUAL_ORIGINAL_INDEX,
+    minIndex: 0,
+    maxIndex: 0,
+  }
 
   // default props
   static defaultProps = {
@@ -676,16 +688,16 @@ export default class VirtuList extends PureComponent<Props, State> {
   }
 
   _onScroll = (event: HTMLElementEvent<HTMLDivElement>): void => {
+    const { startReached, endReached, reachThreshold, onScroll } = this.props;
 
+    onScroll && onScroll(event);
+    const { clientHeight, scrollHeight, scrollTop } = event.target
+    
     // no trigger scroll
     if (this._flag.isAdjustScroll) {
       this._flag.isAdjustScroll = false;
       return;
     }
-    const { startReached, endReached, reachThreshold, onScroll } = this.props;
-    const { clientHeight, scrollHeight, scrollTop } = event.target
-
-    onScroll && onScroll(event);
 
     this.setState(prevState => {
       if (prevState.scrollOffset === scrollTop) {
