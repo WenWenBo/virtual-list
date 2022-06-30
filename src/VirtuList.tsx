@@ -1,10 +1,10 @@
 import { createElement, PureComponent } from "react";
-
-import { cancelTimeout, TimeoutID, requestTimeout } from "./util/timer";
-
-const DEFAULT_ESTIMATED_ITEM_SIZE = 50;
-const IS_SCROLLING_DEBOUNCE_INTERVAL = 150;
-const VIRTUAL_ORIGINAL_INDEX = 10 ** 7; // virtual original index for originalIndex
+import { cancelTimeout, TimeoutID, requestTimeout } from "./common";
+import {
+  getVirtualIndex,
+  DEFAULT_ESTIMATED_ITEM_SIZE,
+  IS_SCROLLING_DEBOUNCE_INTERVAL,
+} from './common';
 
 type ScrollDirection = "forward" | "backward";
 
@@ -57,6 +57,7 @@ interface ItemMetadata {
 interface MetaData {
   itemMetadataMap: { [index: number]: ItemMetadata };
   estimatedItemSize: number;
+  firstMeasuredIndex: number;
   lastMeasuredIndex: number;
 }
 
@@ -79,7 +80,6 @@ interface Props {
   initialScrollOffset?: number;
   startReached?: Function;
   endReached?: Function;
-  itemKey?: (index: number, data: any) => any,
   onScroll?: Function,
 }
 
@@ -91,14 +91,13 @@ interface State {
   scrollUpdateWasRequested: boolean;
 }
 
-const defaultItemKey = (index: number, data: any) => index;
-
 export default class VirtuList extends PureComponent<Props, State> {
 
   _styleCacheMap: Map<number, Object> = new Map();
   _metaData: MetaData = {
     itemMetadataMap: {},
     estimatedItemSize: this.props.estimatedItemSize,
+    firstMeasuredIndex: -1,
     lastMeasuredIndex: -1,
   };
   _outerRef?: HTMLDivElement;
@@ -113,12 +112,12 @@ export default class VirtuList extends PureComponent<Props, State> {
   };
   // anchor item
   _anchorItem: PositionItem = {
-    index: 0,
+    index: getVirtualIndex(),
     offset: 0,
   };
   // 需要定位到的项
   _targetItem: PositionItem = {
-    index: 0,
+    index: getVirtualIndex(),
     offset: 0,
   };
   // flag
@@ -130,9 +129,9 @@ export default class VirtuList extends PureComponent<Props, State> {
     followOutput: false,
   };
   _virtualIndex: VirtualIndex = {
-    initialIndex: VIRTUAL_ORIGINAL_INDEX,
-    minIndex: 0,
-    maxIndex: 0,
+    initialIndex: getVirtualIndex(),
+    minIndex: getVirtualIndex(),
+    maxIndex: getVirtualIndex(),
   }
 
   // default props
@@ -161,11 +160,18 @@ export default class VirtuList extends PureComponent<Props, State> {
   // eslint-disable-next-line no-useless-constructor
   constructor(props: Props) {
     super(props);
+    const { initialIndex } = props;
+    // 初始化时列表的第一项的虚拟下标肯定为 VIRTUAL_ORIGINAL_INDEX
+    this._virtualIndex.initialIndex = getVirtualIndex(
+      typeof initialIndex === 'number' ? initialIndex : 0
+    )
+    this._updateRangeIndex();
+
     this._range = this.getInitialRange();
   }
 
   componentDidMount() {
-    const { initialIndex } = this.props;
+    const { initialIndex } = this._virtualIndex;
     const { itemMetadataMap } = this._metaData;
 
     // if (typeof initialScrollOffset === 'number' && this._outerRef != null) {
@@ -174,7 +180,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     //   console.log(this._outerRef.scrollTop)
     // }
 
-    if (typeof initialIndex === 'number' && this._outerRef != null) {
+    if (this._outerRef != null) {
       this._adjustScroll(itemMetadataMap[initialIndex].offset)
       // init anchor
       this._targetItem = {
@@ -190,6 +196,9 @@ export default class VirtuList extends PureComponent<Props, State> {
     const { itemCount } = this.props;
 
     if (itemCount !== this._prevState.itemCount) {
+      // 更新虚拟的开始和结束下标
+      this._updateRangeIndex();
+
       // 高度发生变化更新要定位到的点为锚点
       this._targetItem = { ...this._anchorItem };
       this._callLengthChangeCallbacks();
@@ -214,7 +223,6 @@ export default class VirtuList extends PureComponent<Props, State> {
       itemData,
       innerRef,
       style,
-      itemKey = defaultItemKey,
     } = this.props;
     const { isScrolling } = this.state;
     const { startIndex, stopIndex } = this._range;
@@ -229,7 +237,7 @@ export default class VirtuList extends PureComponent<Props, State> {
         items.push(
           createElement(children, {
             data: itemData,
-            key: itemKey(index, itemData),
+            key: index,
             isScrolling,
             index, 
             style: this._getItemStyle(index),
@@ -291,20 +299,20 @@ export default class VirtuList extends PureComponent<Props, State> {
   }
 
   getEstimatedTotalSize(): number {
-    const { itemCount } = this.props;
+    const { maxIndex } = this._virtualIndex;
     let { itemMetadataMap, estimatedItemSize, lastMeasuredIndex } = this._metaData;
     let totalSizeOfMeasuredItems = 0;
 
-    if (lastMeasuredIndex >= itemCount) {
-      lastMeasuredIndex = itemCount - 1;
+    if (lastMeasuredIndex > maxIndex) {
+      lastMeasuredIndex = maxIndex;
     }
 
-    if (lastMeasuredIndex >= 0) {
+    if (lastMeasuredIndex !== -1) {
       const itemMetadata = itemMetadataMap[lastMeasuredIndex];
       totalSizeOfMeasuredItems = itemMetadata.offset + itemMetadata.size;
     }
 
-    const numUnmeasuredItems = itemCount - lastMeasuredIndex - 1;
+    const numUnmeasuredItems = maxIndex - lastMeasuredIndex;
     const totalSizeOfUnmeasuredItems = numUnmeasuredItems * estimatedItemSize;
 
     return totalSizeOfMeasuredItems + totalSizeOfUnmeasuredItems;
@@ -336,16 +344,17 @@ export default class VirtuList extends PureComponent<Props, State> {
   }
 
   getInitialRange(): Range {
-    const { height, initialIndex, itemCount } = this.props;
+    const { height } = this.props;
+    const { initialIndex, maxIndex } = this._virtualIndex;
     const { estimatedItemSize } = this._metaData;
     const minNum: number = Math.ceil(height / estimatedItemSize);
 
     let startIndex = initialIndex;
     let stopIndex = initialIndex + minNum - 1;
     // initialIndex 后面的内容不够撑起一屏
-    if (stopIndex >= itemCount) {
-      startIndex -= stopIndex - (itemCount - 1);
-      stopIndex = itemCount - 1;
+    if (stopIndex > maxIndex) {
+      startIndex -= stopIndex - maxIndex;
+      stopIndex = maxIndex;
     }
 
     return {
@@ -357,20 +366,22 @@ export default class VirtuList extends PureComponent<Props, State> {
   getStartIndexForOffset(
     scrollOffset: number,
   ): number {
-    const { itemMetadataMap, lastMeasuredIndex } = this._metaData;
+    const { lastMeasuredIndex } = this._metaData;
+    const { minIndex } = this._virtualIndex;
 
+    const itemMetadata = this.getItemMetadata(lastMeasuredIndex);
     const lastMeasuredItemOffset =
-      lastMeasuredIndex > 0 ? itemMetadataMap[lastMeasuredIndex].offset : 0;
+      lastMeasuredIndex !== -1 ? itemMetadata.offset : 0;
     
     if (lastMeasuredItemOffset >= scrollOffset) {
       return this.findNearestItemBinarySearch(
         lastMeasuredIndex,
-        0,
+        minIndex,
         scrollOffset,
       );
     } else {
       return this.findNearestItemExponentialSearch(
-        Math.max(0, lastMeasuredIndex),
+        Math.max(minIndex, lastMeasuredIndex),
         scrollOffset,
       )
     }
@@ -378,21 +389,22 @@ export default class VirtuList extends PureComponent<Props, State> {
 
   // 定位到底部
   scrollToBottom(): void {
-    const { itemCount } = this.props;
-    this.locateToItem(itemCount - 1);
+    const { maxIndex } = this._virtualIndex;
+    this.locateToItem(maxIndex);
 
     // update scrollTop to anchorItem
     this._scrollToTargetItem();
   }
 
   locateToItem(index: number): void {
-    const { height, itemCount } = this.props;
+    const { height } = this.props;
+    const { minIndex, maxIndex } = this._virtualIndex;
     let startIndex = index;
     let stopIndex = index;
 
     let sumHeight = 0;
     // 向下找到stopIndex
-    while (stopIndex < itemCount && sumHeight < height) {
+    while (stopIndex <= maxIndex && sumHeight < height) {
       sumHeight += this.getItemMetadata(stopIndex).size;
       stopIndex++;
     }
@@ -400,7 +412,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     // 下面的不够撑起一屏，需要向上补齐
     if (sumHeight < height) {
       startIndex--;
-      while (startIndex >= 0 && sumHeight < height) {
+      while (startIndex >= minIndex && sumHeight < height) {
         sumHeight += this.getItemMetadata(startIndex).size;
         startIndex--;
       }
@@ -408,7 +420,7 @@ export default class VirtuList extends PureComponent<Props, State> {
 
     this._targetItem = {
       index: index,
-      offset: index === itemCount - 1
+      offset: index === maxIndex
         ? this.getItemMetadata(index).size : 0,
     };
     this._range = {
@@ -421,7 +433,8 @@ export default class VirtuList extends PureComponent<Props, State> {
     startIndex: number,
     scrollOffset: number,
   ): number {
-    const { height, itemCount } = this.props;
+    const { height } = this.props;
+    const { maxIndex } = this._virtualIndex;
 
     const itemMetadata = this.getItemMetadata(startIndex);
     const maxOffset = scrollOffset + height;
@@ -429,12 +442,12 @@ export default class VirtuList extends PureComponent<Props, State> {
     let offset = itemMetadata.offset + itemMetadata.size;
     let stopIndex = startIndex;
 
-    while (stopIndex < itemCount - 1 && offset < maxOffset) {
+    while (stopIndex <= maxIndex && offset < maxOffset) {
       stopIndex++;
       offset += this.getItemMetadata(stopIndex).size;
     }
 
-    return Math.min(stopIndex, itemCount - 1);
+    return Math.min(stopIndex, maxIndex);
   }
 
   // 在这里更新lastMeasuredIndex
@@ -442,16 +455,26 @@ export default class VirtuList extends PureComponent<Props, State> {
     index: number,
   ): ItemMetadata {
     const { itemSize } = this.props;
-    const { itemMetadataMap, lastMeasuredIndex } = this._metaData;
+    const { minIndex } = this._virtualIndex;
+    let { itemMetadataMap, lastMeasuredIndex, firstMeasuredIndex } = this._metaData;
+
+    if (firstMeasuredIndex < 0 || index < firstMeasuredIndex) {
+      lastMeasuredIndex = -1; // 重置
+    }
+
 
     if (index > lastMeasuredIndex) {
       let offset = 0;
-      if (lastMeasuredIndex >= 0) {
+      let startIdx = lastMeasuredIndex + 1; // 默认从上一次的地方查找起
+      if (lastMeasuredIndex !== -1) {
         const itemMetadata = itemMetadataMap[lastMeasuredIndex];
         offset = itemMetadata.offset + itemMetadata.size;
+      } else {
+        startIdx = minIndex; // 首次就从第一个项查找起
+        this._metaData.firstMeasuredIndex = minIndex;
       }
 
-      for (let i = lastMeasuredIndex + 1; i <= index; i++) {
+      for (let i = startIdx; i <= index; i++) {
         let size = itemSize(i);
 
         itemMetadataMap[i] = {
@@ -483,9 +506,11 @@ export default class VirtuList extends PureComponent<Props, State> {
     low: number,
     offset: number,
   ): number {
+    const { minIndex } = this._virtualIndex;
     while (low <= high) {
       const middle = low + Math.floor((high - low) / 2);
-      const currentOffset = this.getItemMetadata(middle).offset;
+      const itemMetadata = this.getItemMetadata(middle);
+      const currentOffset = itemMetadata.offset;
 
       if (currentOffset === offset) {
         return middle;
@@ -496,7 +521,7 @@ export default class VirtuList extends PureComponent<Props, State> {
       }
     }
 
-    return low > 0 ? low - 1 : 0;
+    return low > minIndex ? low - 1 : minIndex;
   }
 
   // 指数查找
@@ -504,31 +529,32 @@ export default class VirtuList extends PureComponent<Props, State> {
     index: number,
     offset: number,
   ): number {
-    const { itemCount } = this.props;
+    const { maxIndex, minIndex } = this._virtualIndex;
     let interval = 1;
 
     while(
-      index < itemCount &&
+      index <= maxIndex &&
       this.getItemMetadata(index).offset < offset
     ) {
       index += interval;
       interval *= 2;
     }
-
+    const low = minIndex + Math.floor((index - minIndex) / 2);
     return this.findNearestItemBinarySearch(
-      Math.min(index, itemCount - 1),
-      Math.floor(index / 2),
+      Math.min(index, maxIndex),
+      low,
       offset,
     )
   }
 
   _scrollToTargetItem(): void {
-    const { itemMetadataMap } = this._metaData;
+    // const { itemMetadataMap } = this._metaData;
     // update scrollTop to anchorItem
     if (this._outerRef != null) {
       const outRef = this._outerRef as HTMLElement;
       const { index, offset } = this._targetItem;
-      const newScrollOffset = itemMetadataMap[index].offset
+      const itemMetadata = this.getItemMetadata(index);
+      const newScrollOffset = itemMetadata.offset
           + offset;
       if (outRef.scrollTop !== newScrollOffset) {
         this._adjustScroll(newScrollOffset);
@@ -565,11 +591,20 @@ export default class VirtuList extends PureComponent<Props, State> {
     }
   }
 
+  // 重置 index 下标后面的缓存
   resetAfterIndex = (index: number, shouldForceUpdate = true) => {
-    this._metaData.lastMeasuredIndex = Math.min(
-      this._metaData.lastMeasuredIndex,
-      index - 1
-    );
+    const { originalIndex } = this.props;
+
+    if (index <= 0) {
+      this._metaData.firstMeasuredIndex = -1;
+      this._metaData.lastMeasuredIndex = -1;
+    } else {
+      this._metaData.lastMeasuredIndex = Math.min(
+        this._metaData.lastMeasuredIndex,
+        getVirtualIndex(index, originalIndex) - 1
+      );
+    }
+
 
     this._styleCacheMap.clear();
 
@@ -582,11 +617,19 @@ export default class VirtuList extends PureComponent<Props, State> {
     this._flag.followOutput = true;
   }
 
+  _updateRangeIndex(): void {
+    const { itemCount, originalIndex } = this.props;
+    this._virtualIndex.minIndex = getVirtualIndex(0, originalIndex);
+    this._virtualIndex.maxIndex = getVirtualIndex(itemCount - 1, originalIndex)
+  }
+
   _getAnchorItem(): PositionItem {
     const { scrollOffset } = this.state;
     const { itemMetadataMap } = this._metaData;
+
+    const { minIndex } = this._virtualIndex;
     if (scrollOffset <= 0) {
-      return { index: 0, offset: 0 };
+      return { index: minIndex, offset: 0 };
     }
     const index = this.getStartIndexForOffset(scrollOffset);
     return {
@@ -620,10 +663,11 @@ export default class VirtuList extends PureComponent<Props, State> {
   }
 
   _fillRange(): void {
-    const { itemCount, height } = this.props;
+    const { height } = this.props;
+    const { minIndex, maxIndex } = this._virtualIndex;
     const { startIndex, stopIndex } = this._range;
     
-    if (startIndex === 0 && stopIndex === itemCount - 1) {
+    if (startIndex === minIndex && stopIndex === maxIndex) {
       return;
     }
 
@@ -637,14 +681,14 @@ export default class VirtuList extends PureComponent<Props, State> {
       let stopIdx = stopIndex + 1;
       
       // 向后补齐
-      while (stopIdx < itemCount && sumHeight < height) {
+      while (stopIdx <= maxIndex && sumHeight < height) {
         sumHeight += this.getItemMetadata(stopIdx).size;
         stopIdx++;
       }
 
       // 向前补齐
       if (sumHeight < height) {
-        while (startIdx >= 0 && sumHeight < height) {
+        while (startIdx >= minIndex && sumHeight < height) {
           sumHeight += this.getItemMetadata(startIdx).size;
           startIdx--;
         }
@@ -662,18 +706,19 @@ export default class VirtuList extends PureComponent<Props, State> {
    * 数组长度发生变化
    */
   _callLengthChangeCallbacks(): void {
-    const { originalIndex, itemCount } = this.props;
+    const { originalIndex } = this.props;
+    const { maxIndex } = this._virtualIndex;
     if (this._flag.followOutput) {
       /**
        * 定位到底部
        * 容易出现问题，单独拿出来，与其他操作区分
        */
       this._flag.followOutput = false;
-      this.locateToItem(itemCount - 1);
+      this.locateToItem(maxIndex);
     } else {
       if (originalIndex > this._prevState.originalIndex) {
         // 原点变大了，说明头部增加了内容
-        this._rangeStep(originalIndex - this._prevState.originalIndex);
+        this.resetAfterIndex(0);
         this._prevState.originalIndex = originalIndex;
   
         this._flag.disableStartReachCallback = false;
@@ -694,7 +739,7 @@ export default class VirtuList extends PureComponent<Props, State> {
     const { clientHeight, scrollHeight, scrollTop } = event.target
     
     // no trigger scroll
-    if (this._flag.isAdjustScroll) {
+    if (this._flag.isAdjustScroll && scrollTop > 0) {
       this._flag.isAdjustScroll = false;
       return;
     }
@@ -747,14 +792,16 @@ export default class VirtuList extends PureComponent<Props, State> {
 
   _safeStartIndex(startIndex: number): number {
     const { overscanCount } = this.props;
+    const { minIndex } = this._virtualIndex;
     const overscan = Math.max(1, overscanCount);
-    return Math.max(0, startIndex - overscan);
+    return Math.max(minIndex, startIndex - overscan);
   }
 
   _safeStopIndex(stopIndex: number): number {
-    const { overscanCount, itemCount } = this.props
+    const { overscanCount } = this.props
+    const { maxIndex } = this._virtualIndex;
     const overscan = Math.max(1, overscanCount);
-    return Math.max(0, Math.min(itemCount - 1, stopIndex + overscan));
+    return Math.max(0, Math.min(maxIndex, stopIndex + overscan));
   }
 
   _resetIsScrollingDebounced = () => {
