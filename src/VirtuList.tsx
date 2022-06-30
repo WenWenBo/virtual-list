@@ -299,7 +299,8 @@ export default class VirtuList extends PureComponent<Props, State> {
   }
 
   getEstimatedTotalSize(): number {
-    const { maxIndex } = this._virtualIndex;
+    const { itemCount, originalIndex } = this.props;
+    const maxIndex = getVirtualIndex(itemCount - 1, originalIndex);
     let { itemMetadataMap, estimatedItemSize, lastMeasuredIndex } = this._metaData;
     let totalSizeOfMeasuredItems = 0;
 
@@ -743,6 +744,7 @@ export default class VirtuList extends PureComponent<Props, State> {
       this._flag.isAdjustScroll = false;
       return;
     }
+
 
     this.setState(prevState => {
       if (prevState.scrollOffset === scrollTop) {
