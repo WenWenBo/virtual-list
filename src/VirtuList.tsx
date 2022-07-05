@@ -647,22 +647,6 @@ export default class VirtuList extends PureComponent<Props, State> {
     this._prevState.originalIndex = originalIndex;
   }
 
-  /**
-   * 展示区域整体移动多少项，默认向下移动，如果向上则num为负的
-   * @param num 移动项的数量
-   */
-  _rangeStep(num: number): void {
-    if (num === 0) {
-      return;
-    }
-    this._targetItem.index = this._targetItem.index + num;
-    this._range = {
-      startIndex: this._range.startIndex + num,
-      stopIndex: this._range.stopIndex + num,
-    };
-    this.resetAfterIndex(0);
-  }
-
   _fillRange(): void {
     const { height } = this.props;
     const { minIndex, maxIndex } = this._virtualIndex;
@@ -716,6 +700,8 @@ export default class VirtuList extends PureComponent<Props, State> {
        */
       this._flag.followOutput = false;
       this.locateToItem(maxIndex);
+      // 强制更新一次，防止少于一屏是消息不更新
+      this.resetAfterIndex(Math.max(0, this._prevState.itemCount - 1));
     } else {
       if (originalIndex > this._prevState.originalIndex) {
         // 原点变大了，说明头部增加了内容
